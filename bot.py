@@ -12,7 +12,7 @@ class EconomicEmergencyBot:
     def __init__(self):
         # API設定
         genai.configure(api_key=os.environ.get('GEMINI_API_KEY'))
-        self.model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        self.model = genai.GenerativeModel('gemini-1.5-flash')
         
         self.twitter_client = tweepy.Client(
             consumer_key=os.environ.get('TWITTER_API_KEY'),
@@ -251,11 +251,10 @@ class EconomicEmergencyBot:
                 generation_config={'temperature': 0.2, 'max_output_tokens': 200}
             )
             return response.text.strip()
-               except Exception as e:
+        except Exception as e:
             print(f"緊急コンテンツ生成エラー: {e}")
-            # AIが失敗したときは、タイトルだけでシンプルに投稿
+            # AI生成が失敗した場合のフォールバック（確実に投稿される）
             return f"{article['category']}\n{article['title']}\n\n#経済ニュース #速報"
-
 
     def generate_regular_content(self, article: dict):
         """通常投稿用コンテンツ生成"""
