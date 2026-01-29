@@ -251,9 +251,11 @@ class EconomicEmergencyBot:
                 generation_config={'temperature': 0.2, 'max_output_tokens': 200}
             )
             return response.text.strip()
-        except Exception as e:
+               except Exception as e:
             print(f"緊急コンテンツ生成エラー: {e}")
-            return None
+            # AIが失敗したときは、タイトルだけでシンプルに投稿
+            return f"{article['category']}\n{article['title']}\n\n#経済ニュース #速報"
+
 
     def generate_regular_content(self, article: dict):
         """通常投稿用コンテンツ生成"""
