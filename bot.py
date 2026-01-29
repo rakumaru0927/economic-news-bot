@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, date
 import hashlib
 import time
 import pytz
+import requests
+from bs4 import BeautifulSoup
 
 class EconomicEmergencyBot:
     def __init__(self):
@@ -17,11 +19,10 @@ class EconomicEmergencyBot:
             access_token_secret=os.environ.get('TWITTER_ACCESS_SECRET')
         )
         
-        # ファイル管理
         self.history_file = 'posted_history.json'
         self.jst = pytz.timezone('Asia/Tokyo')
         
-        # 緊急アラート判定キーワード（優先度付き）
+        # 緊急アラート判定キーワード
         self.critical_keywords = {
             'fomc_policy': ['FOMC', 'FRB', '政策金利決定', 'パウエル議長', '利上げ決定', '利下げ決定'],
             'boj_policy': ['日銀', '金融政策決定会合', '植田総裁', 'YCC修正', 'マイナス金利解除'],
@@ -50,14 +51,139 @@ class EconomicEmergencyBot:
         self.monthly_safe_limit = 250
         self.daily_regular_limit = 5
 
+    # ========== 記事本文取得機能 ==========
+    
+    def fetch_article_content(self, url: str) -> str:
+        """記事URLから本文を取得して要約用テキストを生成"""
+        try:
+            # newspaper3kで記事取得を試行
+            try:
+                from newspaper import Article
+                article = Article(url, language='ja')
+                article.download()
+                article.parse()
+                
+                if article.text and len(article.text) > 100:
+                    return article.text[:1500]  # 最初の1500文字
+            except:
+                pass
+            
+            # フォールバック：requests + BeautifulSoupで取得
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            
+            response = requests.get(url, headers=headers, timeout=8)
+            response.encoding = response.apparent_encoding
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # 記事本文を探す（一般的なタグを順次試行）
+            content_selectors = [
+                'article', '.article-body', '.entry-content', 
+                '.post-content', '.news-content', '.story-body',
+                'main', '.main-content'
+            ]
+            
+            for selector in content_selectors:
+                element = soup.select_one(selector)
+                if element:
+                    paragraphs = element.find_all('p')
+                    if paragraphs:
+                        text = ' '.join([p.get_text().strip() for p in paragraphs[:5]])
+                        if len(text) > 100:
+                            return text[:1500]
+            
+            return None
+            
+        except Exception as e:
+            print(f"記事本文取得エラー: {e}")
+            return None
+
+    def create_smart_summary(self, title: str, content: str, category: str) -> str:
+        """記事タイトルと本文から実用的な要約を生成（AI不使用）"""
+        
+        # 重要キーワードを抽出
+        important_keywords = []
+        
+        # 数値情報を抽出（金利、株価、為替レートなど）
+        import re
+        numbers = re.findall(r'[\d,]+\.?\d*[%円ドル万億兆ポイント]', content)
+        if numbers:
+            important_keywords.extend(numbers[:2])  # 最初の2つの数値
+        
+        # 重要な固有名詞を抽出
+        key_entities = ['FRB', '日銀', 'パウエル', '植田', 'FOMC', 'GDP', 'CPI', '雇用統計']
+        for entity in key_entities:
+            if entity in content and entity not in title:
+                important_keywords.append(entity)
+        
+        # 重要な動詞・形容詞を抽出
+        key_actions = ['決定', '発表', '上昇', '下落', '引き上げ', '引き下げ', '維持', '変更']
+        for action in key_actions:
+            if action in content and action not in title:
+                important_keywords.append(action)
+                break  # 1つだけ追加
+        
+        # 本文から重要そうな1-2文を抽出
+        sentences = content.replace('。', '。\n').split('\n')
+        important_sentences = []
+        
+        for sentence in sentences[:10]:  # 最初の10文から選択
+            sentence = sentence.strip()
+            if len(sentence) > 20 and len(sentence) < 100:
+                # 数値や重要キーワードを含む文を優先
+                if any(keyword in sentence for keyword in important_keywords[:3]):
+                    important_sentences.append(sentence)
+                    if len(important_sentences) >= 2:
+                        break
+        
+        # 要約文を構築
+        base_text = f"{category}\n"
+        
+        # タイトルを短縮（必要に応じて）
+        clean_title = title.replace(" - Yahoo!ニュース", "").replace(" - ブルームバーグ", "")
+        if len(clean_title) > 60:
+            clean_title = clean_title[:57] + "..."
+        
+        base_text += clean_title
+        
+        # 重要情報を追加
+        if important_keywords:
+            key_info = "、".join(important_keywords[:3])
+            if len(base_text + f"\n\n{key_info}") < 200:
+                base_text += f"\n\n{key_info}"
+        
+        # 重要文を追加（文字数に余裕があれば）
+        if important_sentences and len(base_text) < 150:
+            sentence = important_sentences[0]
+            if len(base_text + f"\n{sentence}") < 220:
+                base_text += f"\n{sentence}"
+        
+        # ハッシュタグを追加
+        hashtags = "\n\n#経済ニュース #速報"
+        
+        # 最終的な文字数調整（URLを含めて280文字以内）
+        max_content_length = 240  # URL(23文字) + 余裕(17文字)を考慮
+        
+        full_text = base_text + hashtags
+        if len(full_text) > max_content_length:
+            # ハッシュタグを優先して、本文をカット
+            available_length = max_content_length - len(hashtags)
+            base_text = base_text[:available_length-1] + "…"
+            full_text = base_text + hashtags
+        
+        return full_text
+
+    # ========== SQ日計算 ==========
+    
     def calculate_major_sq_date(self, year: int, month: int):
         if month not in [3, 6, 9, 12]:
             return None
         first_day = date(year, month, 1)
         days_until_friday = (4 - first_day.weekday()) % 7
         first_friday = first_day + timedelta(days=days_until_friday)
-        second_friday = first_friday + timedelta(days=7)
-        return second_friday
+        return first_friday + timedelta(days=7)
 
     def check_sq_alert(self):
         today = datetime.now(self.jst).date()
@@ -89,6 +215,8 @@ class EconomicEmergencyBot:
         
         return None
 
+    # ========== 記事取得・判定 ==========
+    
     def get_article_hash(self, title: str, url: str) -> str:
         content = f"{title.strip()}{url.strip()}"
         return hashlib.sha256(content.encode('utf-8')).hexdigest()[:12]
@@ -194,45 +322,65 @@ class EconomicEmergencyBot:
         
         return None
 
+    # ========== コンテンツ生成 ==========
+    
     def generate_emergency_content(self, article: dict):
-        """緊急アラート用コンテンツ生成（シンプル版）"""
+        """緊急アラート用コンテンツ生成（記事本文要約版）"""
         if article.get('is_sq_alert'):
             return f"{article['category']}\n{article['content']}\n\n#SQ #先物決済 #投資注意"
         
-        title = article['title']
-        category = article['category']
+        # 記事本文を取得
+        article_content = self.fetch_article_content(article['link'])
         
-        content = f"{category}\n{title}\n\n#経済ニュース #速報"
-        
-        if len(content) > 240:
-            content = content[:237] + "..."
-        
-        return content
+        if article_content:
+            # 本文がある場合は高品質な要約を生成
+            return self.create_smart_summary(article['title'], article_content, article['category'])
+        else:
+            # 本文取得失敗時はタイトルベースで生成
+            return f"{article['category']}\n{article['title'][:100]}...\n\n#経済ニュース #速報"
 
     def generate_regular_content(self, article: dict):
-        """通常投稿用コンテンツ生成（シンプル版）"""
-        title = article['title']
-        category = article['category']
+        """通常投稿用コンテンツ生成（スレッド形式）"""
+        article_content = self.fetch_article_content(article['link'])
         
-        tweet1 = f"【{category}】\n{title}\n\n詳細はこちら👇"
-        if len(tweet1) > 100:
-            tweet1 = tweet1[:97] + "..."
-        
-        tweet2 = f"{category}の最新情報をお届けします。\n\n#経済ニュース #マーケット"
-        
-        return {"tweet1": tweet1, "tweet2": tweet2}
+        if article_content:
+            # 本文がある場合はスレッド用に分割
+            summary = self.create_smart_summary(article['title'], article_content, article['category'])
+            
+            # 1ツイート目（概要）
+            tweet1_lines = summary.split('\n')
+            tweet1 = '\n'.join(tweet1_lines[:3])  # 最初の3行
+            if len(tweet1) > 100:
+                tweet1 = tweet1[:97] + "..."
+            
+            # 2ツイート目（詳細）
+            tweet2 = f"詳細情報やその他の{article['category']}ニュースも随時お届けします。\n\n#経済ニュース #マーケット"
+            
+            return {"tweet1": tweet1, "tweet2": tweet2}
+        else:
+            # フォールバック
+            title = article['title'][:80] + ("..." if len(article['title']) > 80 else "")
+            return {
+                "tweet1": f"【{article['category']}】\n{title}\n\n詳細はこちら👇",
+                "tweet2": f"{article['category']}の最新情報をお届けします。\n\n#経済ニュース #マーケット"
+            }
 
+    # ========== 投稿実行 ==========
+    
     def post_single_tweet(self, content: str, url: str):
         tweet_text = f"{content}\n\n{url}"
         
         if len(tweet_text) > 280:
-            print(f"文字数超過: {len(tweet_text)}文字")
-            return None
+            print(f"文字数超過: {len(tweet_text)}文字 - 自動調整中...")
+            # 緊急時の文字数調整
+            available_length = 280 - len(url) - 3  # URL + 改行2つ + 余裕1文字
+            content = content[:available_length-1] + "…"
+            tweet_text = f"{content}\n\n{url}"
         
         try:
             response = self.twitter_client.create_tweet(text=tweet_text)
             tweet_id = response.data['id']
-            print(f"✓ 投稿成功 [ID: {tweet_id}]")
+            print(f"✓ 投稿成功 [ID: {tweet_id}] 文字数: {len(tweet_text)}")
             return tweet_id
         except Exception as e:
             print(f"✗ 投稿エラー: {e}")
@@ -243,12 +391,14 @@ class EconomicEmergencyBot:
             tweet1_text = f"{content['tweet1']}\n\n{article['link']}"
             
             if len(tweet1_text) > 280:
-                print("1ツイート目が280文字を超えています")
-                return None
+                # 1ツイート目の文字数調整
+                available_length = 280 - len(article['link']) - 3
+                content['tweet1'] = content['tweet1'][:available_length-1] + "…"
+                tweet1_text = f"{content['tweet1']}\n\n{article['link']}"
             
             response1 = self.twitter_client.create_tweet(text=tweet1_text)
             tweet1_id = response1.data['id']
-            print(f"✓ 1ツイート目投稿成功 [ID: {tweet1_id}]")
+            print(f"✓ 1ツイート目投稿成功 [ID: {tweet1_id}] 文字数: {len(tweet1_text)}")
             
             time.sleep(25)
             
@@ -257,7 +407,7 @@ class EconomicEmergencyBot:
                 in_reply_to_tweet_id=tweet1_id
             )
             tweet2_id = response2.data['id']
-            print(f"✓ 2ツイート目投稿成功 [ID: {tweet2_id}]")
+            print(f"✓ 2ツイート目投稿成功 [ID: {tweet2_id}] 文字数: {len(content['tweet2'])}")
             
             return {'tweet1_id': tweet1_id, 'tweet2_id': tweet2_id, 'success': True}
             
@@ -265,6 +415,8 @@ class EconomicEmergencyBot:
             print(f"✗ スレッド投稿エラー: {e}")
             return None
 
+    # ========== 履歴管理 ==========
+    
     def load_history(self) -> dict:
         try:
             if os.path.exists(self.history_file):
@@ -306,6 +458,8 @@ class EconomicEmergencyBot:
             if v.get('posted_at', '')[:10] == today and not v.get('is_emergency', False)
         )
 
+    # ========== メイン実行ロジック ==========
+    
     def run_emergency_check(self):
         print("\n" + "=" * 60)
         print(f"🚨 緊急アラートチェック: {datetime.now(self.jst).strftime('%H:%M:%S')}")
@@ -325,7 +479,7 @@ class EconomicEmergencyBot:
         article = emergency_articles[0]
         print("\n🚨 緊急アラート発動!")
         print(f"   優先度: {article['priority']}/5")
-        print(f"   記事: {article['title']}...")
+        print(f"   記事: {article['title'][:50]}...")
         
         content = self.generate_emergency_content(article)
         if not content:
