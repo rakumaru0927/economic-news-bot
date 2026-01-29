@@ -12,7 +12,7 @@ class EconomicEmergencyBot:
     def __init__(self):
         # API設定
         genai.configure(api_key=os.environ.get('GEMINI_API_KEY'))
-        self.model = genai.GenerativeModel('models/gemini-1.5-flash')
+        self.model = genai.GenerativeModel('gemini-1.5-flash-latest')
         
         self.twitter_client = tweepy.Client(
             consumer_key=os.environ.get('TWITTER_API_KEY'),
